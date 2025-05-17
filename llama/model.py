@@ -1,3 +1,5 @@
+# 注意这代码只是公布的推理的代码，没有训练的代码
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
@@ -197,13 +199,26 @@ class Attention(nn.Module):
 
         """
         super().__init__()
+        # 77、Llama源码讲解之GroupQueryAttention和KV-cache https://www.bilibili.com/video/BV186421f7RL/?spm_id_from=333.788.videopod.sections&vd_source=77a1789b518548c9685fd5236e8488fe
+        # 这部分需要在看完之后重新总结
+        # if n_kv_heads == n_heads:
+        #   mha
+        # elif n_kv_heads < n_heads:
+        #   if n_k_heads == 1 && n_v_heads == 1 && n_heads > 1:
+        #       mqa
+        #   if n_k_heads > 1 && n_v_heads > 1 && n_kv_heads < n_heads:
+        #       gqa
+        # gqa是为了在KV cache中减小内存的要求
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
+        # model_parallel_size，会看一下如果模型太大的话会放在多张卡上
         model_parallel_size = fs_init.get_model_parallel_world_size()
         self.n_local_heads = args.n_heads // model_parallel_size
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
+        # n_repetion
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
+        # ColumnParallelLinear就是一个并行化的线性层，这里就是将x映射到q/k/v的wq/wk/wv。
         self.wq = ColumnParallelLinear(
             args.dim,
             args.n_heads * self.head_dim,
@@ -225,6 +240,7 @@ class Attention(nn.Module):
             gather_output=False,
             init_method=lambda x: x,
         )
+        # 按行进行并行化的mlp
         self.wo = RowParallelLinear(
             args.n_heads * self.head_dim,
             args.dim,
@@ -233,6 +249,7 @@ class Attention(nn.Module):
             init_method=lambda x: x,
         )
 
+        # 这两个是常量，不更新梯度，用来作缓存的。推理的时候才会做kv cache。
         self.cache_k = torch.zeros(
             (
                 args.max_batch_size,
@@ -262,8 +279,8 @@ class Attention(nn.Module):
 
         Args:
             x (torch.Tensor): Input tensor.
-            start_pos (int): Starting position for caching.
-            freqs_cis (torch.Tensor): Precomputed frequency tensor.
+            start_pos (int): Starting position for caching. 当前推理到哪个位置了
+            freqs_cis (torch.Tensor): Precomputed frequency tensor. 旋转位置编码相关
             mask (torch.Tensor, optional): Attention mask tensor.
 
         Returns:
